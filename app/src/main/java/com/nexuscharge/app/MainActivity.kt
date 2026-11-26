@@ -6,26 +6,31 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.text.format.DateFormat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FabPosition
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -35,12 +40,18 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -48,17 +59,25 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleStartEffect
+import kotlinx.coroutines.delay
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            NexusChargeTheme { BatteryScreen() }
+            NexusChargeTheme {
+                var fullScreen by remember { mutableStateOf(false) }
+                if (fullScreen) ChargingScreen(onClose = { fullScreen = false })
+                else BatteryScreen(onStart = { fullScreen = true })
+            }
         }
     }
 }
@@ -76,10 +95,7 @@ fun NexusChargeTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, content = content)
 }
 
-/**
- * Listens for battery broadcasts while the screen is visible.
- * The receiver is registered in onStart and unregistered in onStop, so nothing leaks.
- */
+/** Listens for battery broadcasts only while the screen is visible (no leaks). */
 @Composable
 fun rememberBatteryInfo(): BatteryInfo? {
     val context = LocalContext.current
@@ -91,7 +107,6 @@ fun rememberBatteryInfo(): BatteryInfo? {
                 info = readBatteryInfo(c, intent)
             }
         }
-        // Returns the last ("sticky") battery intent, so the screen fills in immediately.
         val sticky = ContextCompat.registerReceiver(
             context,
             receiver,
@@ -105,11 +120,31 @@ fun rememberBatteryInfo(): BatteryInfo? {
     return info
 }
 
+/** The current time, updated at the start of every minute. */
 @Composable
-fun BatteryScreen() {
+fun rememberNow(): LocalDateTime {
+    var now by remember { mutableStateOf(LocalDateTime.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000L * (60 - LocalDateTime.now().second))
+            now = LocalDateTime.now()
+        }
+    }
+    return now
+}
+
+@Composable
+fun BatteryScreen(onStart: () -> Unit = {}) {
     val info = rememberBatteryInfo()
 
-    Scaffold { innerPadding ->
+    Scaffold(
+        floatingActionButton = {
+            ExtendedFloatingActionButton(onClick = onStart) {
+                Text("▶  Start", fontWeight = FontWeight.Bold)
+            }
+        },
+        floatingActionButtonPosition = FabPosition.Center,
+    ) { innerPadding ->
         Box(
             modifier = Modifier.fillMaxSize().padding(innerPadding),
             contentAlignment = Alignment.TopCenter,
@@ -131,102 +166,178 @@ fun BatteryScreen() {
                 if (info == null) {
                     Text("Reading battery…")
                 } else {
-                    LevelCard(info)
-                    DetailsCard(info)
+                    HeroCard(info)
+                    LiveCard()
+                    TileGrid(buildTiles(info))
                 }
                 AboutCard()
+                Spacer(Modifier.height(88.dp))
             }
         }
     }
 }
 
 @Composable
-fun LevelCard(info: BatteryInfo) {
-    val percentText = info.percent?.let { "$it%" } ?: UNAVAILABLE
-    val chargeText = if (info.isCharging) "Charging" else "Not charging"
-    val spoken = "Battery level " +
-        (info.percent?.let { "$it percent" } ?: "unavailable") + ", $chargeText"
+fun HeroCard(info: BatteryInfo) {
+    val context = LocalContext.current
+    val now = rememberNow()
+    val timePattern = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm"
+    val percent = info.percent
+    val gaugeColor = when {
+        info.isCharging || info.isFull -> Color(0xFF4ADE80)
+        percent != null && percent <= 20 -> Color(0xFFF43F5E)
+        else -> Color(0xFF60A5FA)
+    }
+    val powerText = info.powerW?.let { "%.2f W".format(it) } ?: "Power: $NOT_SUPPORTED"
+    val spoken = "Battery " + (percent?.let { "$it percent" } ?: "level unavailable") +
+        ", ${info.status}, $powerText"
 
-    Card(
+    Surface(
+        color = Color(0xFF0B0B0F),
+        shape = RoundedCornerShape(28.dp),
         modifier = Modifier
             .fillMaxWidth()
             .clearAndSetSemantics { contentDescription = spoken },
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(24.dp),
+            modifier = Modifier.padding(vertical = 28.dp, horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(160.dp)) {
-                CircularProgressIndicator(
-                    progress = { (info.percent ?: 0) / 100f },
-                    modifier = Modifier.fillMaxSize(),
-                    strokeWidth = 12.dp,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
-                Text(percentText, fontSize = 36.sp, fontWeight = FontWeight.Bold)
-            }
-            Spacer(Modifier.height(16.dp))
-            Surface(
-                color = if (info.isCharging) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.extraLarge,
-            ) {
-                Text(
-                    text = if (info.isCharging) "⚡ Charging" else "🔋 Not charging",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun DetailsCard(info: BatteryInfo) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "Details",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.semantics { heading() },
+                text = now.format(DateTimeFormatter.ofPattern(timePattern)),
+                color = Color.White,
+                fontSize = 52.sp,
+                fontWeight = FontWeight.Light,
             )
-            InfoRow("Status", info.status)
-            InfoRow("Charging source", info.source)
-            InfoRow("Fully charged", if (info.isFull) "Yes" else "No")
-            InfoRow("Temperature", info.temperatureC?.let { "%.1f °C".format(it) } ?: UNAVAILABLE)
-            InfoRow("Voltage", info.voltageV?.let { "%.2f V".format(it) } ?: UNAVAILABLE)
-            InfoRow("Health", info.health)
-            InfoRow("Technology", info.technology ?: UNAVAILABLE)
-            InfoRow("Current", info.currentMa?.let { "$it mA" } ?: NOT_SUPPORTED)
-            InfoRow("Charge counter", info.chargeCounterMah?.let { "$it mAh" } ?: NOT_SUPPORTED)
+            Text(
+                text = now.format(DateTimeFormatter.ofPattern("EEE, MMM d")),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 14.sp,
+            )
+            Spacer(Modifier.height(20.dp))
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp)) {
+                Gauge(fraction = (percent ?: 0) / 100f, color = gaugeColor, modifier = Modifier.fillMaxSize())
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = percent?.let { "$it%" } ?: UNAVAILABLE,
+                        color = Color.White,
+                        fontSize = 40.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = info.status.uppercase(),
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp,
+                        letterSpacing = 1.sp,
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = powerText,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/** A 270° ring that fills up with the battery level. */
+@Composable
+fun Gauge(fraction: Float, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = 14.dp.toPx()
+        val inset = stroke / 2
+        val arcSize = Size(size.width - stroke, size.height - stroke)
+        drawArc(
+            color = Color.White.copy(alpha = 0.15f),
+            startAngle = 135f,
+            sweepAngle = 270f,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = arcSize,
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+        drawArc(
+            color = color,
+            startAngle = 135f,
+            sweepAngle = 270f * fraction.coerceIn(0f, 1f),
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = arcSize,
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** Each tile is (value, label). Missing readings never show fake numbers. */
+fun buildTiles(info: BatteryInfo): List<Pair<String, String>> = listOf(
+    (info.voltageV?.let { "%.2f V".format(it) } ?: UNAVAILABLE) to "Voltage",
+    (info.temperatureC?.let { "%.1f °C".format(it) } ?: UNAVAILABLE) to "Temperature",
+    (info.percent?.let { "$it%" } ?: UNAVAILABLE) to "Battery level",
+    info.status to "Status",
+    info.source to "Plugged",
+    info.health to "Health",
+    (info.currentMa?.let { "$it mA" } ?: NOT_SUPPORTED) to "Current",
+    (info.chargeCounterMah?.let { "$it mAh" } ?: NOT_SUPPORTED) to "Charge counter",
+    (info.designCapacityMah?.let { "$it mAh" } ?: UNAVAILABLE) to "Capacity",
+    (info.technology ?: UNAVAILABLE) to "Technology",
+    Build.MANUFACTURER.replaceFirstChar { it.uppercase() } to "Manufacturer",
+    Build.MODEL to "Model",
+)
+
+@Composable
+fun TileGrid(tiles: List<Pair<String, String>>) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val columns = if (maxWidth < 340.dp) 2 else 3
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            tiles.chunked(columns).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    row.forEach { (value, label) -> Tile(value, label, Modifier.weight(1f)) }
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
         }
     }
 }
 
 @Composable
-fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 10.dp)
+fun Tile(value: String, label: String, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(20.dp),
+        modifier = modifier
+            .heightIn(min = 96.dp)
             .semantics(mergeDescendants = true) {},
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.End,
-            modifier = Modifier.weight(1f),
-        )
+        Column(
+            modifier = Modifier.heightIn(min = 96.dp).padding(8.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
-    HorizontalDivider()
 }
 
 @Composable
@@ -241,9 +352,9 @@ fun AboutCard() {
             Spacer(Modifier.height(8.dp))
             Text(
                 text = "Readings come straight from Android and vary by device. Some phones " +
-                    "don't report current or charge counter, and units or signs can differ " +
-                    "between manufacturers. Nexus Charge needs no permissions and does not " +
-                    "collect, store, or send any data.",
+                    "don't report current, charge counter or capacity, and units or signs can " +
+                    "differ between manufacturers. Nexus Charge needs no permissions and does " +
+                    "not collect, store, or send any data.",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
