@@ -3,6 +3,7 @@ package com.nexuscharge.app
 import android.content.Context
 import android.content.Intent
 import android.os.BatteryManager
+import kotlin.math.abs
 
 const val UNAVAILABLE = "Unavailable"
 const val NOT_SUPPORTED = "Not supported"
@@ -20,7 +21,12 @@ data class BatteryInfo(
     val technology: String?,
     val currentMa: Int?,
     val chargeCounterMah: Int?,
-)
+    val designCapacityMah: Int?,
+) {
+    /** Power in watts, only when both voltage and current are valid. */
+    val powerW: Float?
+        get() = if (voltageV != null && currentMa != null) voltageV * abs(currentMa) / 1000f else null
+}
 
 /** Turns the ACTION_BATTERY_CHANGED intent (may be null) into safe, readable values. */
 fun readBatteryInfo(context: Context, intent: Intent?): BatteryInfo {
@@ -53,7 +59,10 @@ fun readBatteryInfo(context: Context, intent: Intent?): BatteryInfo {
     fun property(id: Int): Int? =
         manager?.getIntProperty(id)?.takeIf { it != Int.MIN_VALUE && it != 0 }
 
-    val currentMa = property(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)?.let { it / 1000 }
+    // Most phones report microamps; some report milliamps. Small values are treated as mA.
+    val currentMa = property(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+        ?.let { if (abs(it) >= 10_000) it / 1000 else it }
+        ?.takeIf { it != 0 }
     val chargeCounterMah = property(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
         ?.takeIf { it > 0 }?.let { it / 1000 }
 
@@ -69,20 +78,41 @@ fun readBatteryInfo(context: Context, intent: Intent?): BatteryInfo {
         technology = technology,
         currentMa = currentMa,
         chargeCounterMah = chargeCounterMah,
+        designCapacityMah = designCapacityMah(context.applicationContext),
     )
+}
+
+// The battery's rated capacity is not a public Android API. We try to read it once;
+// if the phone blocks it, the app simply shows "Unavailable".
+private var cachedCapacity: Int? = null
+private var capacityChecked = false
+
+private fun designCapacityMah(context: Context): Int? {
+    if (!capacityChecked) {
+        capacityChecked = true
+        cachedCapacity = try {
+            val profileClass = Class.forName("com.android.internal.os.PowerProfile")
+            val profile = profileClass.getConstructor(Context::class.java).newInstance(context)
+            val mah = profileClass.getMethod("getBatteryCapacity").invoke(profile) as Double
+            mah.toInt().takeIf { it in 500..20_000 }
+        } catch (e: Throwable) {
+            null
+        }
+    }
+    return cachedCapacity
 }
 
 private fun statusText(code: Int) = when (code) {
     BatteryManager.BATTERY_STATUS_CHARGING -> "Charging"
     BatteryManager.BATTERY_STATUS_DISCHARGING -> "Discharging"
-    BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "Plugged in, not charging"
+    BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "Not charging"
     BatteryManager.BATTERY_STATUS_FULL -> "Full"
     else -> "Unknown"
 }
 
 private fun sourceText(plugged: Int) = when (plugged) {
-    0 -> "Not plugged in"
-    BatteryManager.BATTERY_PLUGGED_AC -> "AC charger"
+    0 -> "Unplugged"
+    BatteryManager.BATTERY_PLUGGED_AC -> "AC"
     BatteryManager.BATTERY_PLUGGED_USB -> "USB"
     BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Wireless"
     else -> "Unknown"
