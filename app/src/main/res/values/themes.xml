@@ -1,0 +1,4 @@
+<resources>
+    <!-- Window theme only; the app's colors come from Material 3 in Compose. -->
+    <style name="Theme.NexusCharge" parent="android:Theme.Material.NoActionBar" />
+</resources>
